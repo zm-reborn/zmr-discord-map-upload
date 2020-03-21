@@ -148,6 +148,7 @@ class MyDiscordClient(discord.Client):
 
         if not files:
             resp.errors.append('No files were extracted!')
+            resp.errors.append('The map may already exists.')
             resp.errors.append(
                 'Make sure you have at least %s.bsp inside the zip.' %
                 (data.map_name))
@@ -259,6 +260,8 @@ class MyDiscordClient(discord.Client):
         return success
 
     async def insert_into_mapcycle(self, mapname):
+        print('Inserting map %s into mapcycle...' % (mapname))
+        
         maps = await self.loop.run_in_executor(None, self.read_mapcycle)
 
         sorted_maps = maps
