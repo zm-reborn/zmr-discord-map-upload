@@ -190,34 +190,13 @@ class MyDiscordClient(discord.Client):
         ret_data = MapFileData()
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if 'Content-Length' not in resp.headers:
-                    print('Header had no Content-Length!')
-                    return ret_data
-
-                if 'Content-Disposition' not in resp.headers:
-                    print('Header had no Content-Disposition!')
-                    return ret_data
-
-                content_len = int(resp.headers['Content-Length'])
-                print('Content Length: %i' % (content_len))
-
-                filename = self.get_filename_from_headers(resp.headers)
-
-                if not filename:
-                    print('Content-Disposition had no filename!')
-                    return ret_data
-
-                print('Filename: %s' % (filename))
-
-                ret_data.map_name = filename
-
-                if content_len > self.upload_max_bytes:
-                    print('Content length is past max length of %i!' %
-                          self.upload_max_bytes)
-                    return ret_data
-
-                await self.write_response_to_tempfile(resp, ret_data)
+            try:
+                async with session.get(url) as resp:
+                    self.parse_response(resp, ret_data)
+            except (aiohttp.ClientResponseError) as e:
+                print('Response error: %s' % (e))
+            except (aiohttp.InvalidURL) as e:
+                print('Invalid URL (%s): %s' % (url, e))
 
         return ret_data
 
@@ -261,7 +240,7 @@ class MyDiscordClient(discord.Client):
 
     async def insert_into_mapcycle(self, mapname):
         print('Inserting map %s into mapcycle...' % (mapname))
-        
+
         maps = await self.loop.run_in_executor(None, self.read_mapcycle)
 
         sorted_maps = maps
@@ -278,6 +257,35 @@ class MyDiscordClient(discord.Client):
                 return True
 
         return False
+
+    async def parse_response(self, resp, ret_data):
+        if 'Content-Length' not in resp.headers:
+            print('Header had no Content-Length!')
+            return ret_data
+
+        if 'Content-Disposition' not in resp.headers:
+            print('Header had no Content-Disposition!')
+            return ret_data
+
+        content_len = int(resp.headers['Content-Length'])
+        print('Content Length: %i' % (content_len))
+
+        filename = self.get_filename_from_headers(resp.headers)
+
+        if not filename:
+            print('Content-Disposition had no filename!')
+            return ret_data
+
+        print('Filename: %s' % (filename))
+
+        ret_data.map_name = filename
+
+        if content_len > self.upload_max_bytes:
+            print('Content length is past max length of %i!' %
+                    self.upload_max_bytes)
+            return ret_data
+
+        await self.write_response_to_tempfile(resp, ret_data)
 
     #
     # Blocking
@@ -366,7 +374,12 @@ class MyDiscordClient(discord.Client):
             print('Writing to temporary file %s in chunks of %i...' %
                   (fp.name, chunk_size))
             while True:
-                chunk = await resp.content.read(chunk_size)
+                chunk = None
+                try:
+                    chunk = await resp.content.read(chunk_size)
+                except (Exception) as e:
+                    print('Exception reading content: %s' % (e))
+
                 if not chunk:
                     break
                 await self.loop.run_in_executor(None, fp.write, chunk)
