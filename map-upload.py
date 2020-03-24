@@ -15,6 +15,10 @@ import bz2
 import re
 
 
+def escape_everything(data):
+    return discord.utils.escape_markdown(discord.utils.escape_mentions(data))
+
+
 def safe_extract_from_zip(zipfile, filename, out_dir):
     try:
         return zipfile.extract(filename, out_dir)
@@ -30,18 +34,107 @@ def get_filename_no_ext(filename):
     return name.split('.')[0]
 
 
-class MapFileData():
+class BaseResponse():
     def __init__(self):
+        self.success = False
+        self.errors = []
+
+    def copy_errors(self, resp):
+        self.errors.extend(resp.errors)
+
+    def error(self, msg):
+        self.errors.append(msg)
+
+
+class BaseTopResponse(BaseResponse):
+    def get_errors(self):
+        return self.errors
+
+    def is_success(self):
+        return self.success
+
+
+class ExtractResponse(BaseResponse):
+    def __init__(self):
+        super().__init__()
+        # All files for this specific map that exist
+        self.files = []
+        # All the files extracted, superset of files
+        self.files_extracted = []
+
+
+class FastDLResponse(BaseResponse):
+    def __init__(self):
+        super().__init__()
+        self.files_uploaded = []
+
+
+class MapCycleResponse(BaseResponse):
+    def __init__(self):
+        super().__init__()
+        self.wrote_to_file = False
+
+
+class DownloadFileResponse(BaseResponse):
+    def __init__(self):
+        super().__init__()
         self.temp_file = ''
         self.map_name = ''
-        self.success = False
 
 
-class AddMapResponse():
+#
+# Top responses
+#
+class AddMapToMapCycleResponse(BaseTopResponse):
     def __init__(self):
-        self.errors = []
-        self.files_extracted = 0
-        self.files_compressed = 0
+        super().__init__()
+        self.fastdl = FastDLResponse()
+        self.mapcycle = MapCycleResponse()
+
+    def get_errors(self):
+        errors = self.errors
+        errors.extend(self.fastdl.errors)
+        errors.extend(self.mapcycle.errors)
+        return errors
+
+    def is_success(self):
+        if not self.success:
+            return False
+
+        # No files were uploaded and mapcycle wasn't updated
+        if len(self.fastdl.files_uploaded) == 0:
+            if not self.mapcycle.wrote_to_file:
+                return False
+
+        return True
+
+
+class AddMapResponse(BaseTopResponse):
+    def __init__(self):
+        super().__init__()
+        self.extract = ExtractResponse()
+        self.fastdl = FastDLResponse()
+        self.mapcycle = MapCycleResponse()
+
+    def get_errors(self):
+        errors = self.errors
+        errors.extend(self.extract.errors)
+        errors.extend(self.fastdl.errors)
+        errors.extend(self.mapcycle.errors)
+        return errors
+
+    def is_success(self):
+        if not self.success:
+            return False
+
+        # No files were extracted or uploaded
+        # And mapcycle was not updated.
+        if len(self.fastdl.files_uploaded) == 0:
+            if len(self.extract.files_extracted) == 0:
+                if not self.mapcycle.wrote_to_file:
+                    return False
+
+        return True
 
 
 class MyDiscordClient(discord.Client):
@@ -100,20 +193,48 @@ class MyDiscordClient(discord.Client):
         #
         # Actual actions.
         #
+
+        # Add map through url
         if message.content.startswith('addmap ', 1):
             ret = await self.add_map(
                     message.content[len('!addmap '):])
 
-            if not ret.errors:
+            if ret.is_success():
                 await self.quick_channel_msg(
-                    '%s Success! Extracted %i file(s) and uploaded %i to fast-dl.' %
-                    (message.author.mention,
-                     ret.files_extracted,
-                     ret.files_compressed))
+                    '%s Success! %s' %
+                    (message.author.mention, '\n'.join(ret.get_errors())))
             else:
                 await self.quick_channel_msg(
-                    '%s Failed to upload map. Error: %s' %
-                    (message.author.mention, '\n'.join(ret.errors)))
+                    '%s Failed to upload map. %s' %
+                    (message.author.mention, '\n'.join(ret.get_errors())))
+
+        # Add map to mapcycle (+ add to fast-dl)
+        if message.content.startswith('addmapcycle ', 1):
+            ret = await self.add_mapcycle(
+                    message.content[len('!addmapcycle '):])
+
+            if ret.is_success():
+                await self.quick_channel_msg(
+                    '%s Success! %s' %
+                    (message.author.mention, '\n'.join(ret.get_errors())))
+            else:
+                await self.quick_channel_msg(
+                    '%s Failed to add map to mapcycle! %s' %
+                    (message.author.mention, '\n'.join(ret.get_errors())))
+
+        # Remove map from mapcycle
+        if message.content.startswith('removemapcycle ', 1):
+            ret = await self.remove_mapcycle(
+                    message.content[len('!removemapcycle '):])
+
+            if ret:
+                await self.quick_channel_msg(
+                    '%s Removed map from mapcycle.' %
+                    (message.author.mention))
+            else:
+                await self.quick_channel_msg(
+                    '%s Failed to remove map from mapcycle!' %
+                    (message.author.mention))
 
     #
     # Discord utils
@@ -129,103 +250,169 @@ class MyDiscordClient(discord.Client):
     #
     # Our tasks
     #
+    """Extracts map from a zip file,
+        uploads it to fast-dl and adds it to mapcycle."""
     async def add_map(self, url):
+        print('Adding map from url %s...' % (url))
+
         resp = AddMapResponse()
 
+        #
+        # Download
+        #
         data = await self.download_file(url)
+        resp.copy_errors(data)
+
         if not data.success:
-            resp.errors.append('Failed to download file.')
+            resp.errors = ['Failed to download file.'] + resp.errors
             return resp
 
-        files = []
-
+        #
         # Extract from ZIP
+        #
+        extract_resp = None
+
         if zipfile.is_zipfile(data.temp_file):
-            files = await self.loop.run_in_executor(
+            extract_resp = await self.loop.run_in_executor(
                 None,
                 self.extract_zip,
                 data)
 
-        if not files:
-            resp.errors.append('No files were extracted!')
-            resp.errors.append('The map may already exists.')
-            resp.errors.append(
-                'Make sure you have at least %s.bsp inside the zip.' %
-                (data.map_name))
+        if not extract_resp:
+            resp.error('File must be a .zip file!')
             return resp
 
-        resp.files_extracted = len(files)
+        resp.extract = extract_resp
 
-        # Compress the files with BZIP2
-        compressed_files = await self.loop.run_in_executor(
-            None,
-            self.compress_to_bz2,
-            files)
-
-        if not compressed_files:
-            resp.errors.append('No files were compressed!')
+        if not extract_resp.success:
             return resp
 
-        resp.files_compressed = len(compressed_files)
+        if not len(extract_resp.files_extracted):
+            resp.errors = ['No files were extracted.'] + resp.errors
 
-        # Upload
-        success = await self.upload_files(compressed_files)
+            # Not even already existing files existed, just return
+            if not len(extract_resp.files):
+                return resp
 
-        if not success:
-            resp.errors.append('Failed to upload %i files to fast-dl!' %
-                               (resp.files_compressed))
+        #
+        # Add map to fast-dl
+        #
+        resp.fastdl = await self.add_map_to_fastdl(data.map_name)
+
+        if not resp.fastdl.success:
             return resp
 
-        print('Removing local compressed files...')
-        # Is this blocking?
-        for f in compressed_files:
-            os.remove(f)
-
+        #
         # Finally, insert into mapcycle file.
-        await self.insert_into_mapcycle(data.map_name)
+        #
+        resp.mapcycle = await self.insert_into_mapcycle(data.map_name)
+
+        if not resp.mapcycle.success:
+            return resp
+
+        resp.success = True
 
         return resp
 
+    """Add map to mapcycle and upload files to fast-dl if necessary."""
+    async def add_mapcycle(self, mapname):
+        mapname = get_filename_no_ext(mapname)
+
+        print('Adding map %s to mapcycle...' % (mapname))
+
+        resp = AddMapToMapCycleResponse()
+
+        #
+        # Get map files (make sure it exists)
+        #
+        files = await self.loop.run_in_executor(
+            None,
+            self.get_map_files, mapname, True)
+
+        if not files:
+            resp.error('Map does not exist!')
+            return resp
+
+        #
+        # Add to fast-dl
+        #
+        resp.fastdl = await self.add_map_to_fastdl(mapname)
+
+        if not resp.fastdl.success:
+            return resp
+
+        #
+        # Add to mapcycle
+        #
+        resp.mapcycle = await self.insert_into_mapcycle(mapname)
+
+        if not resp.mapcycle.success:
+            return resp
+
+        resp.success = True
+        return resp
+
+    """Remove map from mapcycle."""
+    async def remove_mapcycle(self, mapname):
+        mapname = get_filename_no_ext(mapname)
+
+        print('Removing map %s from mapcycle...' % (mapname))
+
+        return await self.remove_from_mapcycle(mapname)
+
+    #
+    # Lower routines
+    #
     async def download_file(self, url):
-        ret_data = MapFileData()
+        data = DownloadFileResponse()
 
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url) as resp:
-                    await self.parse_response(resp, ret_data)
+                    await self.parse_response(resp, data)
             except (aiohttp.ClientResponseError) as e:
                 print('Response error: %s' % (e))
             except (aiohttp.InvalidURL) as e:
+                data.error('Invalid URL: %s' %
+                           (escape_everything(url)))
                 print('Invalid URL (%s): %s' % (url, e))
 
-        return ret_data
+        return data
 
-    async def upload_files(self, files):
+    async def upload_files(self, files, override=False):
         print('Uploading files to SFTP...')
 
-        success = False
+        uploaded = -1
 
         try:
-            options = asyncssh.SSHClientConnectionOptions(
-                username=self.sftp_username,
-                password=self.sftp_password,
-                known_hosts=None,
-                x509_trusted_certs=None)
-
             async with asyncssh.connect(
                     host=self.sftp_hostname,
-                    options=options) as conn:
+                    options=self.get_ssh_conn_options()) as conn:
                 print('Established SSH connection server.')
 
                 async with conn.start_sftp_client() as sftp:
                     print('Established SFTP.')
 
+                    # Check if those files exist.
+                    if not override:
+                        try:
+                            old_files = files[:]
+                            for f in old_files:
+                                full_path = os.path.join(
+                                    self.sftp_remote_maps,
+                                    os.path.basename(f))
+                                if await sftp.exists(full_path):
+                                    files.remove(f)
+                        except (asyncssh.SFTPError) as e:
+                            print('Exception checking files: ' + str(e))
+
+                    # Finally, upload them
                     try:
                         await sftp.put(
                             files,
                             remotepath=self.sftp_remote_maps)
 
-                        success = True
+                        uploaded = len(files)
                     except (OSError, asyncssh.SFTPError) as e:
                         print('Exception putting files: ' + str(e))
 
@@ -236,24 +423,160 @@ class MyDiscordClient(discord.Client):
         except (OSError, asyncssh.SFTPError) as e:
             print('SSH/SFTP Exception: ' + str(e))
 
-        return success
+        return uploaded
 
     async def insert_into_mapcycle(self, mapname):
         print('Inserting map %s into mapcycle...' % (mapname))
 
+        resp = MapCycleResponse()
+
         maps = await self.loop.run_in_executor(None, self.read_mapcycle)
+
+        if maps is None:
+            print('Mapcycle does not exists!' % (mapname))
+            return resp
+
+        if await self.map_exists_in_mapcycle(mapname, maps):
+            resp.error('Map %s already exists in mapcycle.' % (mapname))
+            # Consider it success
+            resp.success = True
+            return resp
 
         sorted_maps = maps
         sorted_maps.append(mapname)
         sorted_maps = sorted(maps, key=self.mapcycle_sort)
 
-        await self.loop.run_in_executor(None, self.save_mapcycle, sorted_maps)
+        wrote = await self.loop.run_in_executor(
+            None,
+            self.save_mapcycle, sorted_maps)
 
-    async def map_exists_in_mapcycle(self, mapname):
-        maps = await self.loop.run_in_executor(None, self.read_mapcycle)
+        if wrote:
+            resp.wrote_to_file = True
+            resp.success = True
 
-        async for lmap in maps:
-            if re.search(mapname, lmap):
+        return resp
+
+    async def remove_from_mapcycle(self, mapname):
+        mapcycle = await self.loop.run_in_executor(None, self.read_mapcycle)
+
+        removed = False
+        for lmap in mapcycle:
+            if re.match(mapname, lmap):
+                mapcycle.remove(lmap)
+                removed = True
+                break
+
+        if removed:
+            wrote = await self.loop.run_in_executor(
+                None,
+                self.save_mapcycle, mapcycle)
+            return wrote
+
+        return False
+
+    """Add map to fast-dl if we have any files to add."""
+    async def add_map_to_fastdl(self, mapname, override_files=False):
+        mapname = get_filename_no_ext(mapname)
+
+        print('Adding map %s to fast-dl...' % (mapname))
+
+        resp = FastDLResponse()
+
+        # Add local path, upload only files
+        files = await self.loop.run_in_executor(
+            None,
+            self.get_map_files, mapname, True, True)
+
+        # We don't have this map's files!
+        if not files:
+            return resp
+
+        files_exist = None
+
+        # Check if those files exist on the fast-dl.
+        if not override_files:
+            try:
+                async with asyncssh.connect(
+                        host=self.sftp_hostname,
+                        options=self.get_ssh_conn_options()) as conn:
+                    print('Established SSH connection server.')
+
+                    async with conn.start_sftp_client() as sftp:
+                        print('Established SFTP.')
+
+                        print('Checking for any existing files...')
+                        files_exist = []
+                        try:
+                            for f in files:
+                                full_path = os.path.join(
+                                    self.sftp_remote_maps,
+                                    os.path.basename(f + '.bz2'))
+                                if await sftp.exists(full_path):
+                                    print('%s already exists' % (full_path))
+                                    files_exist.append(f)
+                        except (asyncssh.SFTPError) as e:
+                            print('Exception checking files: %s' % (e))
+
+                    print('Closed SFTP connection.')
+
+                print('Closed SSH connection.')
+
+            except (OSError, asyncssh.SFTPError) as e:
+                print('SSH/SFTP Exception: ' + str(e))
+
+            if files_exist is None:
+                print('Error occurred checking %s fast-dl files.' % (mapname))
+                return resp
+
+            if len(files_exist) == len(files):
+                resp.error('Fast-dl already has all files.')
+                # Consider it as success
+                resp.success = True
+                return resp
+
+            if len(files_exist) > 0:
+                print('Fast-dl already had some of the map files...')
+                for f in files_exist:
+                    files.remove(f)
+
+        #
+        # Compress the files with BZIP2
+        #
+        compressed_files = await self.loop.run_in_executor(
+            None,
+            self.compress_to_bz2,
+            files)
+
+        if not compressed_files:
+            resp.error('No files were compressed!')
+            return resp
+
+        #
+        # Upload
+        #
+        uploaded = await self.upload_files(compressed_files)
+
+        resp.files_uploaded = compressed_files
+
+        if uploaded == -1:
+            resp.error('Failed to upload files to fast-dl!')
+
+        print('Removing local compressed files...')
+        # Is this blocking?
+        for f in compressed_files:
+            os.remove(f)
+
+        resp.success = True
+        return resp
+
+    async def map_exists_in_mapcycle(self, mapname, mapcycle=None):
+        if not mapcycle:
+            mapcycle = await self.loop.run_in_executor(
+                None,
+                self.read_mapcycle)
+
+        for lmap in mapcycle:
+            if re.match(mapname, lmap):
                 return True
 
         return False
@@ -281,8 +604,10 @@ class MyDiscordClient(discord.Client):
         ret_data.map_name = filename
 
         if content_len > self.upload_max_bytes:
+            ret_data.error('File size goes over limit of %.1f MB' %
+                           (self.upload_max_bytes / 1e6))
             print('Content length is past max length of %i!' %
-                    self.upload_max_bytes)
+                  (self.upload_max_bytes))
             return ret_data
 
         await self.write_response_to_tempfile(resp, ret_data)
@@ -291,64 +616,88 @@ class MyDiscordClient(discord.Client):
     # Blocking
     #
     def read_mapcycle(self):
-        maps = []
+        maps = None
 
-        with open(self.mapcycle_file, 'r') as fp:
-            maps = fp.read().splitlines()
+        try:
+            with open(self.mapcycle_file, 'r') as fp:
+                maps = fp.read().splitlines()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            print('Unexpected error reading mapcycle: %s' % (e))
 
         return maps
 
     def save_mapcycle(self, maps):
         print('Saving maps to mapcycle...')
 
-        with open(self.mapcycle_file, 'w') as fp:
-            fp.write('\n'.join(maps))
-            fp.write('\n')
+        ok = False
+
+        try:
+            with open(self.mapcycle_file, 'w') as fp:
+                fp.write('\n'.join(maps))
+                fp.write('\n')
+            ok = True
+        except OSError as e:
+            print('Error writing mapcycle: %s' % (e))
+
+        return ok
 
     def extract_zip(self, data):
+        ret = ExtractResponse()
+
         print('Extracting ZIP contents of %s...' % (data.temp_file))
 
         files = []
 
         if not os.path.exists(data.temp_file):
             print('Zip file %s does not exist!' % (data.temp_file))
-            return files
+            return ret
 
-        safe_extract = [
-            data.map_name + '.bsp',
-            data.map_name + '.txt',
-            data.map_name + '.nav'
-        ]
+        safe_extract = self.get_map_files(data.map_name)
 
         with zipfile.ZipFile(data.temp_file) as file:
             for f in safe_extract:
                 out_file = os.path.join(self.maps_dir, f)
 
+                info = None
+                try:
+                    info = file.getinfo(f)
+                except KeyError:
+                    pass
+
                 if os.path.exists(out_file):
-                    print('Cannot extract file %s because it already exists!' %
+                    # Already exists
+                    if info:
+                        ret.files.append(f)
+                    ret.error('%s already exists.' % (f))
+                    print('Cannot extract file %s because it already exists.' %
                           (out_file))
                     continue
 
-                out_file2 = safe_extract_from_zip(file, f, self.maps_dir)
+                # File does not exist
+                if not info:
+                    continue
+
+                out_file2 = file.extract(f, self.maps_dir)
                 if out_file2:
-                    files.append(out_file)
+                    ret.files.append(out_file)
+                    ret.files_extracted.append(out_file)
 
         os.remove(data.temp_file)
 
         print('Extracted files:')
-        for f in files:
+        for f in ret.files_extracted:
             print('%s' % (f))
 
-        return files
+        ret.success = True
+
+        return ret
 
     def compress_to_bz2(self, files):
         compressed_files = []
 
         for uf in files:
-            # We want to ignore this file?
-            if re.search(self.bz2_ignore_regex, uf):
-                continue
-
             with open(uf, 'rb') as ufp:
                 cf_name = uf + '.bz2'
                 with bz2.open(cf_name, 'wb', self.bz2_compressionlevel) as cfp:
@@ -415,6 +764,41 @@ class MyDiscordClient(discord.Client):
             return lower
 
         return match.group(1)
+
+    def get_ssh_conn_options(self):
+        return asyncssh.SSHClientConnectionOptions(
+            username=self.sftp_username,
+            password=self.sftp_password,
+            known_hosts=None,
+            x509_trusted_certs=None)
+
+    def get_map_files(self, mapname, add_local_path=False, upload_only=False):
+        files = [
+            mapname + '.bsp',
+            mapname + '.txt',
+            mapname + '.nav'
+        ]
+
+        # Remove all files not getting uploaded.
+        if upload_only:
+            temp = files[:]
+            for f in temp:
+                if re.search(self.bz2_ignore_regex, f):
+                    files.remove(f)
+
+        # Add full path to files
+        # Make sure the files exist.
+        if add_local_path:
+            temp = []
+            for f in files:
+                full_path = os.path.join(self.maps_dir, f)
+                
+                if os.path.exists(full_path):
+                    temp.append(full_path)
+
+            files = temp
+
+        return files
 
 
 if __name__ == '__main__':
