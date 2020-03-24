@@ -192,7 +192,7 @@ class MyDiscordClient(discord.Client):
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url) as resp:
-                    self.parse_response(resp, ret_data)
+                    await self.parse_response(resp, ret_data)
             except (aiohttp.ClientResponseError) as e:
                 print('Response error: %s' % (e))
             except (aiohttp.InvalidURL) as e:
