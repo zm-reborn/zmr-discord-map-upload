@@ -586,17 +586,19 @@ class MyDiscordClient(discord.Client):
             print('Header had no Content-Length!')
             return ret_data
 
-        if 'Content-Disposition' not in resp.headers:
-            print('Header had no Content-Disposition!')
-            return ret_data
 
         content_len = int(resp.headers['Content-Length'])
         print('Content Length: %i' % (content_len))
 
+        self.get_filename_from_url(resp.url)
         filename = self.get_filename_from_headers(resp.headers)
 
+        # Try url
         if not filename:
-            print('Content-Disposition had no filename!')
+            filename = self.get_filename_from_url(resp.url)
+
+        if not filename:
+            print('Headers had no filename!')
             return ret_data
 
         print('Filename: %s' % (filename))
@@ -738,6 +740,10 @@ class MyDiscordClient(discord.Client):
     # Utils
     #
     def get_filename_from_headers(self, headers):
+        if 'Content-Disposition' not in headers:
+            print('Header had no Content-Disposition!')
+            return ''
+
         disp = headers['Content-Disposition']
         match = re.search(
                 r'filename=(?:"|)((?:\w|.)+?)(?:"|)(?:;|$)',
@@ -750,6 +756,9 @@ class MyDiscordClient(discord.Client):
         filename = get_filename_no_ext(match.group(1))
 
         return filename
+
+    def get_filename_from_url(self, url):
+        return get_filename_no_ext(url.path)
 
     """The map name may have comments or
         other fluff in it that we want to ignore when sorting."""
