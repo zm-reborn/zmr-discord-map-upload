@@ -648,8 +648,6 @@ class MyDiscordClient(discord.Client):
 
         print('Extracting ZIP contents of %s...' % (data.temp_file))
 
-        files = []
-
         if not os.path.exists(data.temp_file):
             print('Zip file %s does not exist!' % (data.temp_file))
             return ret
@@ -792,7 +790,7 @@ class MyDiscordClient(discord.Client):
             temp = []
             for f in files:
                 full_path = os.path.join(self.maps_dir, f)
-                
+
                 if os.path.exists(full_path):
                     temp.append(full_path)
 
