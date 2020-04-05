@@ -586,6 +586,20 @@ class MyDiscordClient(discord.Client):
             print('Header had no Content-Length!')
             return ret_data
 
+        if 'Content-Type' not in resp.headers:
+            print('Header had no Content-Type!')
+            return ret_data
+
+        cont_type = resp.headers['Content-Type']
+
+        valid_types = [
+            'application/zip',
+            'application/binary'
+        ]
+
+        if cont_type not in valid_types:
+            print('Header had invalid Content-Type "%s"!' % (cont_type))
+            return ret_data
 
         content_len = int(resp.headers['Content-Length'])
         print('Content Length: %i' % (content_len))
