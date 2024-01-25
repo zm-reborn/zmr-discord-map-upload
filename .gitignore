@@ -2,3 +2,4 @@
 .ssh
 
 .config.ini
+docker-compose.yml

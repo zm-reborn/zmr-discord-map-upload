@@ -1,13 +1,19 @@
 # Discord Map Upload
 
-A Discord bot to upload maps through Discord.
-You can add a map with ```!addmap url_to_file.zip``` command.
-Must be a zip file.
+A Discord bot to upload maps to game servers through Discord.
 
-#### Installation:
+You can add a map with ```!addmap http://example.com/map.zip``` command. The file must be a zip.
 
-- Install Python 3 and make sure it's in your PATH.
-- Run `pip install -r requirements.txt`
-- Configure ```.config.ini``` (create a copy of  ```.config.template.ini```)
-    - You'll need bot token and channel id at minimum.
-- Run the ```map-upload.py``` script.
+## Installation (Docker)
+
+```bash
+cp .config.template.ini .config.ini
+
+# Configure .config.ini file.
+
+cp docker-compose.template.yml docker-compose.yml
+
+# Configure docker-compose.yml file with paths to your maps directory and mapcycle file.
+
+docker compose up
+```
