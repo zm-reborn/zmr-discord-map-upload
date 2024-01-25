@@ -8,14 +8,15 @@ import aiohttp
 # Our stuff
 from configparser import ConfigParser
 import os
-import asyncio
 import tempfile
 import zipfile
 import bz2
 import re
+import yarl
+import multidict
 
 
-def escape_everything(data):
+def escape_everything(data: str):
     return discord.utils.escape_markdown(discord.utils.escape_mentions(data))
 
 
@@ -28,7 +29,7 @@ def safe_extract_from_zip(zipfile, filename, out_dir):
     return ''
 
 
-def get_filename_no_ext(filename):
+def get_filename_no_ext(filename: str):
     name = os.path.basename(filename)
     # Split always returns an array with at least 1 element.
     return name.split('.')[0]
@@ -138,8 +139,10 @@ class AddMapResponse(BaseTopResponse):
 
 
 class MyDiscordClient(discord.Client):
-    def __init__(self, config):
-        super().__init__()
+    def __init__(self, config: ConfigParser):
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(intents=intents)
 
         self.my_channel = None
         # self.my_guild = None
@@ -175,7 +178,9 @@ class MyDiscordClient(discord.Client):
 
         # self.my_guild = self.my_channel.guild
 
-    async def on_message(self, message):
+    async def on_message(self, message: discord.Message):
+        if not self.is_ready():
+            return
         # Not command?
         if not message.content or message.content[0] != '!':
             return
@@ -239,11 +244,9 @@ class MyDiscordClient(discord.Client):
     #
     # Discord utils
     #
-    async def quick_channel_msg(self, msg, channel=None):
-        if channel is None:
-            channel = self.my_channel
+    async def quick_channel_msg(self, msg: str):
         try:
-            await channel.send(msg)
+            await self.my_channel.send(msg)
         except Exception as e:
             print(e)
 
@@ -252,7 +255,7 @@ class MyDiscordClient(discord.Client):
     #
     """Extracts map from a zip file,
         uploads it to fast-dl and adds it to mapcycle."""
-    async def add_map(self, url):
+    async def add_map(self, url: str):
         print('Adding map from url %s...' % (url))
 
         resp = AddMapResponse()
@@ -315,7 +318,7 @@ class MyDiscordClient(discord.Client):
         return resp
 
     """Add map to mapcycle and upload files to fast-dl if necessary."""
-    async def add_mapcycle(self, mapname):
+    async def add_mapcycle(self, mapname: str):
         mapname = get_filename_no_ext(mapname)
 
         print('Adding map %s to mapcycle...' % (mapname))
@@ -353,7 +356,7 @@ class MyDiscordClient(discord.Client):
         return resp
 
     """Remove map from mapcycle."""
-    async def remove_mapcycle(self, mapname):
+    async def remove_mapcycle(self, mapname: str):
         mapname = get_filename_no_ext(mapname)
 
         print('Removing map %s from mapcycle...' % (mapname))
@@ -363,7 +366,7 @@ class MyDiscordClient(discord.Client):
     #
     # Lower routines
     #
-    async def download_file(self, url):
+    async def download_file(self, url: str):
         data = DownloadFileResponse()
 
         async with aiohttp.ClientSession() as session:
@@ -379,7 +382,7 @@ class MyDiscordClient(discord.Client):
 
         return data
 
-    async def upload_files(self, files, override=False):
+    async def upload_files(self, files: list[str], override=False):
         print('Uploading files to SFTP...')
 
         uploaded = -1
@@ -425,7 +428,7 @@ class MyDiscordClient(discord.Client):
 
         return uploaded
 
-    async def insert_into_mapcycle(self, mapname):
+    async def insert_into_mapcycle(self, mapname: str):
         print('Inserting map %s into mapcycle...' % (mapname))
 
         resp = MapCycleResponse()
@@ -456,8 +459,11 @@ class MyDiscordClient(discord.Client):
 
         return resp
 
-    async def remove_from_mapcycle(self, mapname):
+    async def remove_from_mapcycle(self, mapname: str):
         mapcycle = await self.loop.run_in_executor(None, self.read_mapcycle)
+
+        if mapcycle is None:
+            return False
 
         removed = False
         for lmap in mapcycle:
@@ -475,7 +481,7 @@ class MyDiscordClient(discord.Client):
         return False
 
     """Add map to fast-dl if we have any files to add."""
-    async def add_map_to_fastdl(self, mapname, override_files=False):
+    async def add_map_to_fastdl(self, mapname: str, override_files=False):
         mapname = get_filename_no_ext(mapname)
 
         print('Adding map %s to fast-dl...' % (mapname))
@@ -569,11 +575,14 @@ class MyDiscordClient(discord.Client):
         resp.success = True
         return resp
 
-    async def map_exists_in_mapcycle(self, mapname, mapcycle=None):
+    async def map_exists_in_mapcycle(self, mapname: str, mapcycle: list[str] | None):
         if not mapcycle:
             mapcycle = await self.loop.run_in_executor(
                 None,
                 self.read_mapcycle)
+            
+        if mapcycle is None:
+            return
 
         for lmap in mapcycle:
             if re.match(mapname, lmap):
@@ -581,7 +590,7 @@ class MyDiscordClient(discord.Client):
 
         return False
 
-    async def parse_response(self, resp, ret_data):
+    async def parse_response(self, resp: aiohttp.ClientResponse, ret_data: DownloadFileResponse):
         if 'Content-Length' not in resp.headers:
             print('Header had no Content-Length!')
             return ret_data
@@ -644,7 +653,7 @@ class MyDiscordClient(discord.Client):
 
         return maps
 
-    def save_mapcycle(self, maps):
+    def save_mapcycle(self, maps: list[str]):
         print('Saving maps to mapcycle...')
 
         ok = False
@@ -659,7 +668,7 @@ class MyDiscordClient(discord.Client):
 
         return ok
 
-    def extract_zip(self, data):
+    def extract_zip(self, data: DownloadFileResponse):
         ret = ExtractResponse()
 
         print('Extracting ZIP contents of %s...' % (data.temp_file))
@@ -708,8 +717,8 @@ class MyDiscordClient(discord.Client):
 
         return ret
 
-    def compress_to_bz2(self, files):
-        compressed_files = []
+    def compress_to_bz2(self, files: list[str]):
+        compressed_files: list[str] = []
 
         for uf in files:
             with open(uf, 'rb') as ufp:
@@ -728,7 +737,7 @@ class MyDiscordClient(discord.Client):
 
         return compressed_files
 
-    async def write_response_to_tempfile(self, resp, ret_data):
+    async def write_response_to_tempfile(self, resp: aiohttp.ClientResponse, ret_data: DownloadFileResponse):
         chunk_size = self.upload_chunksize
 
         with tempfile.NamedTemporaryFile(
@@ -753,7 +762,7 @@ class MyDiscordClient(discord.Client):
     #
     # Utils
     #
-    def get_filename_from_headers(self, headers):
+    def get_filename_from_headers(self, headers: multidict.CIMultiDictProxy[str]):
         if 'Content-Disposition' not in headers:
             print('Header had no Content-Disposition!')
             return ''
@@ -771,12 +780,12 @@ class MyDiscordClient(discord.Client):
 
         return filename
 
-    def get_filename_from_url(self, url):
+    def get_filename_from_url(self, url: yarl.URL):
         return get_filename_no_ext(url.path)
 
     """The map name may have comments or
         other fluff in it that we want to ignore when sorting."""
-    def mapcycle_sort(self, mapname):
+    def mapcycle_sort(self, mapname: str):
         lower = mapname.lower()
 
         match = re.search(self.mapcycle_regex, lower)
@@ -793,7 +802,7 @@ class MyDiscordClient(discord.Client):
             known_hosts=None,
             x509_trusted_certs=None)
 
-    def get_map_files(self, mapname, add_local_path=False, upload_only=False):
+    def get_map_files(self, mapname: str, add_local_path=False, upload_only=False):
         files = [
             mapname + '.bsp',
             mapname + '.txt',
@@ -823,13 +832,15 @@ class MyDiscordClient(discord.Client):
 
 
 if __name__ == '__main__':
-    # Read our config
     config = ConfigParser()
     with open(os.path.join(os.path.dirname(__file__), '.config.ini')) as fp:
         config.read_file(fp)
+
     client = MyDiscordClient(config)
 
     try:
         client.run(config.get('discord', 'token'))
     except discord.LoginFailure:
         print('Failed to log in! Make sure your token is correct!')
+    except Exception as e:
+        print(f'Something went wrong: {str(e)}')
