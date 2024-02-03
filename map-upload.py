@@ -14,19 +14,18 @@ import bz2
 import re
 import yarl
 import multidict
+import logging
+import sys
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+ch = logging.StreamHandler()
+ch.setLevel(logging.DEBUG)
+logger.addHandler(ch)
 
 
 def escape_everything(data: str):
     return discord.utils.escape_markdown(discord.utils.escape_mentions(data))
-
-
-def safe_extract_from_zip(zipfile, filename, out_dir):
-    try:
-        return zipfile.extract(filename, out_dir)
-    except (KeyError) as e:
-        pass
-
-    return ''
 
 
 def get_filename_no_ext(filename: str):
@@ -38,12 +37,12 @@ def get_filename_no_ext(filename: str):
 class BaseResponse():
     def __init__(self):
         self.success = False
-        self.errors = []
+        self.errors: list[str] = []
 
-    def copy_errors(self, resp):
+    def copy_errors(self, resp: 'BaseResponse'):
         self.errors.extend(resp.errors)
 
-    def error(self, msg):
+    def error(self, msg: str):
         self.errors.append(msg)
 
 
@@ -165,21 +164,30 @@ class MyDiscordClient(discord.Client):
         self.bz2_ignore_regex = config.get('bz2', 'ignoreregex')
         self.bz2_compressionlevel = int(config.get('bz2', 'compressionlevel'))
 
+        self.init_done = False
+
     #
     # Discord.py
     #
     async def on_ready(self):
-        print('Logged on as', self.user)
+        logger.info(f'Logged on as {self.user}')
 
-        self.my_channel = self.get_channel(self.channel_id)
-        if self.my_channel is None:
+        chnl = self.get_channel(self.channel_id)
+        if chnl is None:
             raise Exception('Channel with id %i does not exist!' %
                             self.channel_id)
+        if not isinstance(chnl, discord.TextChannel):
+            raise Exception(f'Channel {self.channel_id} is not a text channel!')
 
+        self.my_channel = chnl
+        self.init_done = True
         # self.my_guild = self.my_channel.guild
 
     async def on_message(self, message: discord.Message):
         if not self.is_ready():
+            return
+        if not self.init_done:
+            logger.debug('Init not done yet. Cannot react to a new message.')
             return
         # Not command?
         if not message.content or message.content[0] != '!':
@@ -245,10 +253,11 @@ class MyDiscordClient(discord.Client):
     # Discord utils
     #
     async def quick_channel_msg(self, msg: str):
+        assert self.my_channel
         try:
             await self.my_channel.send(msg)
         except Exception as e:
-            print(e)
+            logger.error(f'Failed to send message: {str(e)}')
 
     #
     # Our tasks
@@ -256,7 +265,7 @@ class MyDiscordClient(discord.Client):
     """Extracts map from a zip file,
         uploads it to fast-dl and adds it to mapcycle."""
     async def add_map(self, url: str):
-        print('Adding map from url %s...' % (url))
+        logger.info('Adding map from url %s...' % (url))
 
         resp = AddMapResponse()
 
@@ -321,7 +330,7 @@ class MyDiscordClient(discord.Client):
     async def add_mapcycle(self, mapname: str):
         mapname = get_filename_no_ext(mapname)
 
-        print('Adding map %s to mapcycle...' % (mapname))
+        logger.info('Adding map %s to mapcycle...' % (mapname))
 
         resp = AddMapToMapCycleResponse()
 
@@ -359,7 +368,7 @@ class MyDiscordClient(discord.Client):
     async def remove_mapcycle(self, mapname: str):
         mapname = get_filename_no_ext(mapname)
 
-        print('Removing map %s from mapcycle...' % (mapname))
+        logger.info('Removing map %s from mapcycle...' % (mapname))
 
         return await self.remove_from_mapcycle(mapname)
 
@@ -374,16 +383,16 @@ class MyDiscordClient(discord.Client):
                 async with session.get(url) as resp:
                     await self.parse_response(resp, data)
             except (aiohttp.ClientResponseError) as e:
-                print('Response error: %s' % (e))
+                logger.error('Response error: %s' % (e))
             except (aiohttp.InvalidURL) as e:
                 data.error('Invalid URL: %s' %
                            (escape_everything(url)))
-                print('Invalid URL (%s): %s' % (url, e))
+                logger.error('Invalid URL (%s): %s' % (url, e))
 
         return data
 
     async def upload_files(self, files: list[str], override=False):
-        print('Uploading files to SFTP...')
+        logger.info('Uploading files to SFTP...')
 
         uploaded = -1
 
@@ -391,10 +400,10 @@ class MyDiscordClient(discord.Client):
             async with asyncssh.connect(
                     host=self.sftp_hostname,
                     options=self.get_ssh_conn_options()) as conn:
-                print('Established SSH connection server.')
+                logger.info('Established SSH connection server.')
 
                 async with conn.start_sftp_client() as sftp:
-                    print('Established SFTP.')
+                    logger.info('Established SFTP.')
 
                     # Check if those files exist.
                     if not override:
@@ -407,7 +416,7 @@ class MyDiscordClient(discord.Client):
                                 if await sftp.exists(full_path):
                                     files.remove(f)
                         except (asyncssh.SFTPError) as e:
-                            print('Exception checking files: ' + str(e))
+                            logger.error('Exception checking files: ' + str(e))
 
                     # Finally, upload them
                     try:
@@ -417,26 +426,26 @@ class MyDiscordClient(discord.Client):
 
                         uploaded = len(files)
                     except (OSError, asyncssh.SFTPError) as e:
-                        print('Exception putting files: ' + str(e))
+                        logger.error('Exception putting files: ' + str(e))
 
-                print('Closed SFTP connection.')
+                logger.debug('Closed SFTP connection.')
 
-            print('Closed SSH connection.')
+            logger.debug('Closed SSH connection.')
 
         except (OSError, asyncssh.SFTPError) as e:
-            print('SSH/SFTP Exception: ' + str(e))
+            logger.error('SSH/SFTP Exception: ' + str(e))
 
         return uploaded
 
     async def insert_into_mapcycle(self, mapname: str):
-        print('Inserting map %s into mapcycle...' % (mapname))
+        logger.info('Inserting map %s into mapcycle...' % (mapname))
 
         resp = MapCycleResponse()
 
         maps = await self.loop.run_in_executor(None, self.read_mapcycle)
 
         if maps is None:
-            print('Mapcycle does not exists!' % (mapname))
+            logger.info('Mapcycle does not exists!')
             return resp
 
         if await self.map_exists_in_mapcycle(mapname, maps):
@@ -484,7 +493,7 @@ class MyDiscordClient(discord.Client):
     async def add_map_to_fastdl(self, mapname: str, override_files=False):
         mapname = get_filename_no_ext(mapname)
 
-        print('Adding map %s to fast-dl...' % (mapname))
+        logger.info('Adding map %s to fast-dl...' % (mapname))
 
         resp = FastDLResponse()
 
@@ -505,12 +514,12 @@ class MyDiscordClient(discord.Client):
                 async with asyncssh.connect(
                         host=self.sftp_hostname,
                         options=self.get_ssh_conn_options()) as conn:
-                    print('Established SSH connection server.')
+                    logger.info('Established SSH connection server.')
 
                     async with conn.start_sftp_client() as sftp:
-                        print('Established SFTP.')
+                        logger.info('Established SFTP.')
 
-                        print('Checking for any existing files...')
+                        logger.info('Checking for any existing files...')
                         files_exist = []
                         try:
                             for f in files:
@@ -521,17 +530,17 @@ class MyDiscordClient(discord.Client):
                                     print('%s already exists' % (full_path))
                                     files_exist.append(f)
                         except (asyncssh.SFTPError) as e:
-                            print('Exception checking files: %s' % (e))
+                            logger.error('Exception checking files: %s' % (e))
 
-                    print('Closed SFTP connection.')
+                    logger.debug('Closed SFTP connection.')
 
-                print('Closed SSH connection.')
+                logger.debug('Closed SSH connection.')
 
             except (OSError, asyncssh.SFTPError) as e:
-                print('SSH/SFTP Exception: ' + str(e))
+                logger.error('SSH/SFTP Exception: ' + str(e))
 
             if files_exist is None:
-                print('Error occurred checking %s fast-dl files.' % (mapname))
+                logger.info('Error occurred checking %s fast-dl files.' % (mapname))
                 return resp
 
             if len(files_exist) == len(files):
@@ -541,7 +550,7 @@ class MyDiscordClient(discord.Client):
                 return resp
 
             if len(files_exist) > 0:
-                print('Fast-dl already had some of the map files...')
+                logger.info('Fast-dl already had some of the map files...')
                 for f in files_exist:
                     files.remove(f)
 
@@ -567,7 +576,7 @@ class MyDiscordClient(discord.Client):
         if uploaded == -1:
             resp.error('Failed to upload files to fast-dl!')
 
-        print('Removing local compressed files...')
+        logger.info('Removing local compressed files...')
         # Is this blocking?
         for f in compressed_files:
             os.remove(f)
@@ -592,11 +601,11 @@ class MyDiscordClient(discord.Client):
 
     async def parse_response(self, resp: aiohttp.ClientResponse, ret_data: DownloadFileResponse):
         if 'Content-Length' not in resp.headers:
-            print('Header had no Content-Length!')
+            logger.info('Header had no Content-Length!')
             return ret_data
 
         if 'Content-Type' not in resp.headers:
-            print('Header had no Content-Type!')
+            logger.info('Header had no Content-Type!')
             return ret_data
 
         cont_type = resp.headers['Content-Type']
@@ -607,11 +616,11 @@ class MyDiscordClient(discord.Client):
         ]
 
         if cont_type not in valid_types:
-            print('Header had invalid Content-Type "%s"!' % (cont_type))
+            logger.info('Header had invalid Content-Type "%s"!' % (cont_type))
             return ret_data
 
         content_len = int(resp.headers['Content-Length'])
-        print('Content Length: %i' % (content_len))
+        logger.info('Content Length: %i' % (content_len))
 
         self.get_filename_from_url(resp.url)
         filename = self.get_filename_from_headers(resp.headers)
@@ -621,17 +630,17 @@ class MyDiscordClient(discord.Client):
             filename = self.get_filename_from_url(resp.url)
 
         if not filename:
-            print('Headers had no filename!')
+            logger.info('Headers had no filename!')
             return ret_data
 
-        print('Filename: %s' % (filename))
+        logger.info('Filename: %s' % (filename))
 
         ret_data.map_name = filename
 
         if content_len > self.upload_max_bytes:
             ret_data.error('File size goes over limit of %.1f MB' %
                            (self.upload_max_bytes / 1e6))
-            print('Content length is past max length of %i!' %
+            logger.info('Content length is past max length of %i!' %
                   (self.upload_max_bytes))
             return ret_data
 
@@ -649,12 +658,12 @@ class MyDiscordClient(discord.Client):
         except FileNotFoundError:
             pass
         except OSError as e:
-            print('Unexpected error reading mapcycle: %s' % (e))
+            logger.error('Unexpected error reading mapcycle: %s' % (e))
 
         return maps
 
     def save_mapcycle(self, maps: list[str]):
-        print('Saving maps to mapcycle...')
+        logger.info('Saving maps to mapcycle...')
 
         ok = False
 
@@ -664,17 +673,17 @@ class MyDiscordClient(discord.Client):
                 fp.write('\n')
             ok = True
         except OSError as e:
-            print('Error writing mapcycle: %s' % (e))
+            logger.error('Error writing mapcycle: %s' % (e))
 
         return ok
 
     def extract_zip(self, data: DownloadFileResponse):
         ret = ExtractResponse()
 
-        print('Extracting ZIP contents of %s...' % (data.temp_file))
+        logger.info('Extracting ZIP contents of %s...' % (data.temp_file))
 
         if not os.path.exists(data.temp_file):
-            print('Zip file %s does not exist!' % (data.temp_file))
+            logger.info('Zip file %s does not exist!' % (data.temp_file))
             return ret
 
         safe_extract = self.get_map_files(data.map_name)
@@ -694,7 +703,7 @@ class MyDiscordClient(discord.Client):
                     if info:
                         ret.files.append(f)
                     ret.error('%s already exists.' % (f))
-                    print('Cannot extract file %s because it already exists.' %
+                    logger.info('Cannot extract file %s because it already exists.' %
                           (out_file))
                     continue
 
@@ -709,9 +718,9 @@ class MyDiscordClient(discord.Client):
 
         os.remove(data.temp_file)
 
-        print('Extracted files:')
+        logger.info('Extracted files:')
         for f in ret.files_extracted:
-            print('%s' % (f))
+            logger.info('%s' % (f))
 
         ret.success = True
 
@@ -731,9 +740,9 @@ class MyDiscordClient(discord.Client):
                         cfp.write(chunk)
                     compressed_files.append(cf_name)
 
-        print('Compressed files:')
+        logger.info('Compressed files:')
         for f in compressed_files:
-            print('%s' % (f))
+            logger.info('%s' % (f))
 
         return compressed_files
 
@@ -743,14 +752,14 @@ class MyDiscordClient(discord.Client):
         with tempfile.NamedTemporaryFile(
                 prefix='mapupload_',
                 delete=False) as fp:
-            print('Writing to temporary file %s in chunks of %i...' %
+            logger.info('Writing to temporary file %s in chunks of %i...' %
                   (fp.name, chunk_size))
             while True:
                 chunk = None
                 try:
                     chunk = await resp.content.read(chunk_size)
                 except (Exception) as e:
-                    print('Exception reading content: %s' % (e))
+                    logger.error('Exception reading content: %s' % (e))
 
                 if not chunk:
                     break
@@ -764,7 +773,7 @@ class MyDiscordClient(discord.Client):
     #
     def get_filename_from_headers(self, headers: multidict.CIMultiDictProxy[str]):
         if 'Content-Disposition' not in headers:
-            print('Header had no Content-Disposition!')
+            logger.info('Header had no Content-Disposition!')
             return ''
 
         disp = headers['Content-Disposition']
@@ -838,9 +847,15 @@ if __name__ == '__main__':
 
     client = MyDiscordClient(config)
 
+    exitcode = 0
     try:
         client.run(config.get('discord', 'token'))
     except discord.LoginFailure:
-        print('Failed to log in! Make sure your token is correct!')
+        logger.error('Failed to log in! Make sure your token is correct!')
+        exitcode = 1
     except Exception as e:
-        print(f'Something went wrong: {str(e)}')
+        logger.error(f'Something went wrong: {str(e)}')
+        exitcode = 2
+
+    if exitcode > 0:
+        sys.exit(exitcode)
