@@ -165,6 +165,7 @@ class MyDiscordClient(discord.Client):
         self.bz2_compressionlevel = int(config.get('bz2', 'compressionlevel'))
 
         self.init_done = False
+        self.exitcode = 0
 
     #
     # Discord.py
@@ -174,10 +175,15 @@ class MyDiscordClient(discord.Client):
 
         chnl = self.get_channel(self.channel_id)
         if chnl is None:
-            raise Exception('Channel with id %i does not exist!' %
-                            self.channel_id)
+            logger.error(f'Channel with id {self.channel_id} does not exist!')
+            self.exitcode = 1
+            await self.close()
+            return
         if not isinstance(chnl, discord.TextChannel):
-            raise Exception(f'Channel {self.channel_id} is not a text channel!')
+            logger.error(f'Channel {self.channel_id} is not a text channel!')
+            self.exitcode = 1
+            await self.close()
+            return
 
         self.my_channel = chnl
         self.init_done = True
@@ -847,15 +853,14 @@ if __name__ == '__main__':
 
     client = MyDiscordClient(config)
 
-    exitcode = 0
     try:
         client.run(config.get('discord', 'token'))
     except discord.LoginFailure:
         logger.error('Failed to log in! Make sure your token is correct!')
-        exitcode = 1
+        client.exitcode = 2
     except Exception as e:
         logger.error(f'Something went wrong: {str(e)}')
-        exitcode = 2
+        client.exitcode = 1
 
-    if exitcode > 0:
-        sys.exit(exitcode)
+    if client.exitcode > 0:
+        sys.exit(client.exitcode)
