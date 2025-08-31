@@ -1,8 +1,8 @@
-FROM python:3.11
+FROM python:3.13
 
-COPY requirements.txt map-upload.py /app/
+COPY requirements.txt mapupload.py util.py run.py /app/
 WORKDIR /app
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-CMD python ./map-upload.py
+CMD python ./run.py

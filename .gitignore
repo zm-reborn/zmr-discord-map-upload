@@ -1,5 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+
 # asyncssh
 .ssh
 
+.vscode/
+
 .config.ini
 docker-compose.yml
+__test/

@@ -1,8 +1,7 @@
-version: "3"
 services:
   discordmapupload:
     build: ./
     volumes:
-      - "./.config.ini:/app/.config.ini"
+      - "./.config.ini:/app/.config.ini:ro"
       - "/INSERT_PATH_HERE/mapcycle.txt:/app/mapcycle.txt"
       - "/INSERT_PATH_HERE/maps:/app/maps"
