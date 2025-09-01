@@ -314,22 +314,21 @@ async def _upload_files(config: MapUploadConfig, files: list[_CompressedFile], o
                 host=config.sftp_hostname,
                 port=config.sftp_port,
                 options=_ssh_connection_options(config)) as conn:
-            logger.info('Established SSH connection server.')
+            logger.debug('Established SSH connection server.')
 
             async with conn.start_sftp_client() as sftp:
-                logger.info('Established SFTP.')
+                logger.debug('Established SFTP.')
 
                 # Check if those files exist.
                 if not override:
-                    rel_files = [os.path.basename(f.real_file) for f in files]
-                    ret = await _get_new_sftp_files(sftp, config.sftp_remote_maps_path, rel_files)
-                    if ret:
-                        for f in ret:
-                            for f2 in files:
-                                if f2.real_file == f:
-                                    files.remove(f2)
-                                    break
-                    elif ret is not None:
+                    fls = [f.real_file for f in files]
+                    new_files = await _get_new_sftp_files(sftp, config.sftp_remote_maps_path, fls)
+                    if new_files:
+                        # Remove files already in fast-dl.
+                        for i in range(len(files)-1, -1, -1):
+                            if files[i].real_file not in new_files:
+                                files.pop(i)
+                    elif new_files is not None:
                         files = []  # Don't upload anything
 
                 # Finally, upload them
@@ -339,7 +338,7 @@ async def _upload_files(config: MapUploadConfig, files: list[_CompressedFile], o
                         for f in files:
                             remotepath = os.path.join(config.sftp_remote_maps_path,
                                                       os.path.basename(
-                                                          f.real_file)).replace('\\', '/')
+                                                          f.real_file)).replace('\\', '/') + '.bz2'
                             await sftp.put(
                                 f.compressed_file,
                                 remotepath=remotepath)
@@ -368,7 +367,7 @@ async def _get_new_sftp_files(sftp: asyncssh.SFTPClient,
         for f in old_files:
             full_path = os.path.join(
                 sftp_remote_maps_path,
-                os.path.basename(f)).replace('\\', '/')
+                os.path.basename(f)).replace('\\', '/') + '.bz2'
             if await sftp.exists(full_path):
                 files.remove(f)
                 logger.info('%s already exists.', full_path)
@@ -470,10 +469,10 @@ async def _add_map_to_fastdl(loop: AbstractEventLoop,
                     host=config.sftp_hostname,
                     port=config.sftp_port,
                     options=_ssh_connection_options(config)) as conn:
-                logger.info('Established SSH connection server.')
+                logger.debug('Established SSH connection server.')
 
                 async with conn.start_sftp_client() as sftp:
-                    logger.info('Established SFTP.')
+                    logger.debug('Established SFTP.')
                     new_files = await _get_new_sftp_files(sftp, config.sftp_remote_maps_path, files)
 
                 logger.debug('Closed SFTP connection.')
